@@ -148,3 +148,56 @@ class Engine:
             ),
             revision=self.state.revision,
         )
+
+    def correct(self, correction: Correction):
+        if correction.id in self.state.corrections:
+            raise ValueError("Correction has already been applied")
+        replacements = {item.id: item for item in correction.replacements}
+        if len(replacements) != len(correction.replacements):
+            raise ValueError("Correction contains duplicate evidence IDs")
+        old = {item.id: item for item in self.state.pack.evidence}
+        if any(key not in old for key in replacements):
+            raise ValueError("Corrections must replace existing evidence IDs")
+        if any(item.revision != old[key].revision + 1 for key, item in replacements.items()):
+            raise ValueError("Correction revisions must increment by exactly one")
+        payload = self.state.pack.model_dump(mode="json")
+        payload["evidence"] = [
+            replacements.get(item.id, item).model_dump(mode="json")
+            for item in self.state.pack.evidence
+        ]
+        updated_pack = Pack.model_validate(payload)
+        new_claims = learn(updated_pack)
+        before = {claim.id.split("@")[0]: claim for claim in self.state.claims}
+        after = {claim.id.split("@")[0]: claim for claim in new_claims}
+        changed = set()
+        changed_claims = []
+        for key in before.keys() | after.keys():
+            if before.get(key) != after.get(key):
+                for claim in (before.get(key), after.get(key)):
+                    if claim:
+                        changed.add(f"{claim.kind}:" + " ".join(words(claim.key)))
+                        changed_claims.append(claim)
+        affected = {
+            line.id
+            for line in updated_pack.episode
+            if any(
+                f"{claim.kind}:" + " ".join(words(claim.key)) in dependency_keys(line)
+                and in_scope(claim.scope, line.context)
+                for claim in changed_claims
+            )
+        }
+        pending = set(self.state.plan)
+        self.state.pack = updated_pack
+        self.state.claims = new_claims
+        self.state.revision += 1
+        self.state.corrections.append(correction.id)
+        for subtitle_id in affected:
+            self.state.decisions.pop(subtitle_id, None)
+        self.event(
+            "correction",
+            correction=correction.model_dump(mode="json"),
+            changed_dependencies=sorted(changed),
+            affected=sorted(affected),
+        )
+        self.replan(affected | pending)
+        return sorted(affected)

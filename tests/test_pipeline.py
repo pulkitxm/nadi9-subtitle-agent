@@ -1,21 +1,11 @@
 import json
-
-
 from pathlib import Path
-
 
 import pytest
 
-
 from nadi9.engine import Engine
-
-
 from nadi9.models import Candidate, Correction, Limits, Pack, State
-
-
 from nadi9.providers import ReplayProvider
-
-
 from nadi9.storage import export, summary
 
 
@@ -40,6 +30,57 @@ def test_conflict_unsupported_term_and_context_are_not_silently_released(pack):
     assert state.decisions["S004"].nadi_9_text == "Mira 7 vo"
     assert state.decisions["S005"].decision == "HUMAN_REVIEW"
     assert summary(state)["recommendation"] == "HOLD"
+
+
+def test_correction_only_reprocesses_affected_context(pack, correction):
+    engine = Engine.start(pack)
+    engine.run()
+    previous = engine.state.decisions["S001"].model_dump()
+    calls = engine.state.limits.model_calls
+    assert engine.correct(correction) == ["S002"]
+    engine.run()
+    assert engine.state.decisions["S002"].nadi_9_text == "sa mi vo"
+    assert engine.state.decisions["S001"].model_dump() == previous
+    assert engine.state.limits.model_calls == calls + 1
+    assert "poison-you" in json.dumps(engine.state.events[1])
+    with pytest.raises(ValueError, match="already"):
+        engine.correct(correction)
+
+
+def test_failed_correction_does_not_mutate_state(pack, correction):
+    engine = Engine.start(pack)
+    snapshot = engine.state.model_dump_json()
+    correction.replacements[0].source_id = "unknown"
+    with pytest.raises(ValueError):
+        engine.correct(correction)
+    assert engine.state.model_dump_json() == snapshot
+
+
+def test_correction_halfway_through_preserves_pending_work(pack, correction):
+    engine = Engine.start(pack)
+    engine.run(max_lines=2)
+    engine.correct(correction)
+    state = engine.run()
+    assert len(state.decisions) == len(pack.episode)
+    assert not state.plan
+
+
+def test_two_approved_examples_can_be_retracted(pack):
+    engine = Engine.start(pack)
+    engine.run()
+    replacements = [
+        item.model_copy(update={"active": False, "revision": 2})
+        for item in pack.evidence
+        if item.id in {"E01", "E04"}
+    ]
+    engine.correct(
+        Correction(
+            id="retract", reason="Two approved examples were mistaken", replacements=replacements
+        )
+    )
+    engine.run()
+    assert engine.state.decisions["S001"].decision == "ABSTAIN"
+    assert engine.state.decisions["S006"].decision == "ABSTAIN"
 
 
 def test_injected_source_text_never_controls_decisions(pack):
@@ -86,6 +127,19 @@ def test_timing_and_preserved_literals_are_verified(pack):
     state = Engine.start(pack).run()
     assert "reading_speed_exceeds_20_cps" in state.decisions["S004"].checks
     assert "duration_outside_1_to_7_seconds" in state.decisions["S004"].checks
+
+
+def test_saved_state_resume_and_exports(pack, tmp_path):
+    engine = Engine.start(pack)
+    engine.run(max_lines=2)
+    export(engine.state, tmp_path)
+    resumed = Engine(State.model_validate_json((tmp_path / "state.json").read_text()))
+    resumed.run()
+    export(resumed.state, tmp_path)
+    assert len(resumed.state.decisions) == 6
+    assert len((tmp_path / "subtitle_decisions.jsonl").read_text().splitlines()) == 6
+    assert "[REVIEW REQUIRED: S002]" in (tmp_path / "subtitles.srt").read_text()
+    assert "00:00:00,000 --> 00:00:03,000" in (tmp_path / "subtitles.srt").read_text()
 
 
 def test_reproducible_offline_run(pack):
