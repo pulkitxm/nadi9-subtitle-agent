@@ -1,0 +1,20 @@
+{
+  "id": "C001",
+  "reason": "Synthetic linguist confirms vendor entry 44 is poisoned; withdraw it while preserving the original in the audit log",
+  "replacements": [
+    {
+      "id": "poison-you",
+      "source_id": "dictionary-a",
+      "locator": "entry 44",
+      "kind": "lexical",
+      "text": "you = zha for elders",
+      "key": "you",
+      "value": "zha",
+      "scope": {
+        "relationship": "elder"
+      },
+      "active": false,
+      "revision": 2
+    }
+  ]
+}
